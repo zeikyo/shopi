@@ -8,10 +8,10 @@ import discord
 from discord import app_commands
 
 from alerts import build_product_embed, send_product_alert
-from dashboard import send_dashboard
+from dashboard import AddUrlModal, send_dashboard
 from database import Database
 from discord_logs import send_log
-from scraper import ProductSnapshot, is_valid_shopify_watch_url, normalize_url
+from scraper import ProductSnapshot, normalize_url
 
 
 LOGGER = logging.getLogger("shop-monitor.commands")
@@ -82,94 +82,12 @@ def setup_commands(
     async def dashboard(interaction: discord.Interaction, salon: discord.TextChannel) -> None:
         await send_dashboard(bot, db, monitor, interaction, salon)
 
-    @tree.command(name="add_url", description="Ajoute une URL de boutique, collection ou produit a surveiller.")
-    @app_commands.describe(
-        url="URL a surveiller",
-        salon="Salon ou envoyer les alertes",
-        intervalle="Intervalle en secondes",
-        role_ping="Role a ping lors des alertes, optionnel",
-    )
-    async def add_url(
-        interaction: discord.Interaction,
-        url: str,
-        salon: discord.TextChannel,
-        intervalle: Optional[int] = None,
-        role_ping: Optional[discord.Role] = None,
-    ) -> None:
+    @tree.command(name="add_url", description="Ouvre le flow interactif pour ajouter une URL Shopify.")
+    async def add_url(interaction: discord.Interaction) -> None:
         if not await _require_admin(interaction):
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        intervalle = max(intervalle or default_interval, MIN_INTERVAL_SECONDS)
-        normalized_url = normalize_url(url)
-        guild_id = _guild_id(interaction)
-
-        if not is_valid_shopify_watch_url(normalized_url):
-            await interaction.followup.send(
-                "URL refusee: utilise une URL Shopify de boutique, collection ou produit.",
-                ephemeral=True,
-            )
-            return
-
-        if db.get_watch_by_url(guild_id, normalized_url) is not None:
-            await interaction.followup.send(
-                "Cette URL est deja surveillee sur ce serveur. Utilise `/set_channel`, `/set_interval` ou `/resume`.",
-                ephemeral=True,
-            )
-            return
-
-        if db.count_watches(guild_id) >= max_watches_per_guild:
-            await interaction.followup.send(
-                f"Limite atteinte: maximum {max_watches_per_guild} watches par serveur.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            scrape_result = await monitor.fetch_products_once(normalized_url)
-            products = scrape_result.products
-        except Exception as exc:
-            LOGGER.exception("Premier scan impossible pour %s", normalized_url)
-            await interaction.followup.send(f"Impossible de scraper cette URL pour le moment: `{exc}`", ephemeral=True)
-            return
-        if not products:
-            await interaction.followup.send(
-                "Aucun produit detecte sur cette URL. La watch n'a pas ete ajoutee.",
-                ephemeral=True,
-            )
-            return
-
-        watch = db.add_watch(
-            guild_id,
-            normalized_url,
-            salon.id,
-            intervalle,
-            role_ping.id if role_ping else None,
-        )
-        db.upsert_products(watch.id, products)
-        monitor.restart_watch(watch.id)
-
-        role_line = f"Role ping: {role_ping.mention}\n" if role_ping else "Role ping: aucun\n"
-        await interaction.followup.send(
-            f"Surveillance activee pour {normalized_url}\n"
-            f"Salon: {salon.mention}\n"
-            f"{role_line}"
-            f"Intervalle: {intervalle}s\n"
-            f"Produits sauvegardes au premier scan: {len(products)}\n"
-            f"Source: {scrape_result.stats.source}, requetes HTTP: {scrape_result.stats.requests}\n"
-            "Aucune alerte massive n'a ete envoyee pour ce premier scan.",
-            ephemeral=True,
-        )
-        await send_log(
-            bot,
-            f"Watch activee avec {len(products)} produit(s) initialement sauvegarde(s).",
-            "info",
-            interaction.guild,
-            db=db,
-            action="Watch ajoutee",
-            url=normalized_url,
-            user=interaction.user,
-        )
+        _guild_id(interaction)
+        await interaction.response.send_modal(AddUrlModal(bot, db, monitor))
 
     @tree.command(name="remove_url", description="Supprime une URL surveillee.")
     async def remove_url(interaction: discord.Interaction, url: str) -> None:

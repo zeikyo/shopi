@@ -71,7 +71,7 @@ Les migrations non destructives ajoutent aussi les champs utiles comme `ping_rol
 Seules les personnes avec la permission Administrateur peuvent utiliser les commandes.
 
 ```text
-/add_url url salon intervalle
+/add_url
 /remove_url url
 /list_urls
 /set_channel url salon
@@ -89,15 +89,10 @@ Seules les personnes avec la permission Administrateur peuvent utiliser les comm
 Exemple:
 
 ```text
-/add_url https://lmdx.fr/collections/lmdx-etb #annonces 15
+/add_url
 ```
 
-Avec ping role:
-
-```text
-/add_url https://lmdx.fr/collections/lmdx-etb #annonces 15 @Drops
-/set_ping_role https://lmdx.fr/collections/lmdx-etb @Drops
-```
+`/add_url` ouvre un flow interactif: colle l'URL Shopify, choisis le salon dans le menu Discord, choisis l'intervalle, ajoute un role optionnel si besoin, puis confirme.
 
 Quand une URL est ajoutee, le bot fait un premier scan et sauvegarde les produits trouves sans envoyer d'alertes massives. Les alertes commencent aux scans suivants.
 
@@ -165,7 +160,7 @@ Le dashboard affiche l'etat global du monitor et propose des boutons:
 - Stats
 - Refresh
 
-Les boutons utilisent des `custom_id` fixes et la View est enregistree au demarrage, donc le dashboard reste utilisable apres redemarrage du bot. Seuls les administrateurs peuvent l'utiliser.
+Le bouton Ajouter URL ouvre le meme flow interactif que `/add_url`: aucun ID brut a saisir, tout passe par les menus et boutons Discord. Les boutons du dashboard utilisent des `custom_id` fixes et la View est enregistree au demarrage, donc le dashboard reste utilisable apres redemarrage du bot. Seuls les administrateurs peuvent l'utiliser.
 
 ## Logs Discord
 

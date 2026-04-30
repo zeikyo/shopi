@@ -159,9 +159,6 @@ async def send_dashboard(
 
 class AddUrlModal(discord.ui.Modal, title="Ajouter une URL"):
     url = discord.ui.TextInput(label="URL Shopify", placeholder="https://site.fr/collections/drop", max_length=500)
-    channel = discord.ui.TextInput(label="Salon alertes ID ou mention", placeholder="#annonces ou 123456789", max_length=120)
-    interval = discord.ui.TextInput(label="Intervalle secondes", default="15", max_length=5)
-    role_ping = discord.ui.TextInput(label="Role ping optionnel ID ou mention", required=False, max_length=120)
 
     def __init__(self, bot: discord.Client, db: Database, monitor: Any) -> None:
         super().__init__(timeout=300)
@@ -173,58 +170,250 @@ class AddUrlModal(discord.ui.Modal, title="Ajouter une URL"):
         if interaction.guild is None or not _is_admin(interaction):
             await _deny(interaction)
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
 
         normalized_url = normalize_url(str(self.url.value))
         if not is_valid_shopify_watch_url(normalized_url):
-            await interaction.followup.send("URL Shopify invalide.", ephemeral=True)
+            await interaction.response.send_message("URL Shopify invalide.", ephemeral=True)
             return
         if self.db.get_watch_by_url(interaction.guild.id, normalized_url) is not None:
-            await interaction.followup.send("Cette URL est deja surveillee.", ephemeral=True)
+            await interaction.response.send_message("Cette URL est deja surveillee.", ephemeral=True)
+            return
+        max_watches = int(getattr(self.bot, "max_watches_per_guild", 20))
+        if self.db.count_watches(interaction.guild.id) >= max_watches:
+            await interaction.response.send_message(
+                f"Limite atteinte: maximum {max_watches} watches par serveur.",
+                ephemeral=True,
+            )
             return
 
-        alert_channel = _resolve_text_channel(interaction.guild, str(self.channel.value))
-        if alert_channel is None:
-            await interaction.followup.send("Salon d'alertes introuvable.", ephemeral=True)
+        view = AddUrlConfigView(self.bot, self.db, self.monitor, normalized_url)
+        await interaction.response.send_message(
+            embed=view.build_embed(interaction.guild),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class AlertChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Choisir le salon des alertes",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, AddUrlConfigView):
             return
+        await view.set_channel(interaction, self.values[0])
+
+
+class PingRoleSelect(discord.ui.RoleSelect):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Choisir un role a ping (optionnel)",
+            min_values=0,
+            max_values=1,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, AddUrlConfigView):
+            return
+        role = self.values[0] if self.values else None
+        await view.set_role(interaction, role)
+
+
+class AddUrlConfigView(discord.ui.View):
+    def __init__(self, bot: discord.Client, db: Database, monitor: Any, url: str) -> None:
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.db = db
+        self.monitor = monitor
+        self.url = url
+        self.channel_id: int | None = None
+        self.role_id: int | None = None
+        self.interval_seconds = 15
+        self.add_item(AlertChannelSelect())
+        self.add_item(PingRoleSelect())
+        self._sync_interval_buttons()
+
+    def _selected_channel(self, guild: discord.Guild) -> discord.TextChannel | discord.Thread | None:
+        if self.channel_id is None:
+            return None
+        channel = guild.get_channel(self.channel_id)
+        return channel if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
+
+    def _selected_role(self, guild: discord.Guild) -> discord.Role | None:
+        return guild.get_role(self.role_id) if self.role_id is not None else None
+
+    def _config_lines(self, guild: discord.Guild) -> str:
+        channel = self._selected_channel(guild)
+        role = self._selected_role(guild)
+        return (
+            f"URL: <{self.url}>\n"
+            f"Salon: {channel.mention if channel else 'a choisir'}\n"
+            f"Intervalle: {self.interval_seconds}s\n"
+            f"Role ping: {role.mention if role else 'aucun'}"
+        )
+
+    def build_embed(self, guild: discord.Guild, status: str | None = None) -> discord.Embed:
+        embed = discord.Embed(
+            title="Configurer la nouvelle URL",
+            description=self._config_lines(guild),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Validation",
+            value=status or "Choisis le salon, ajuste l'intervalle, puis confirme.",
+            inline=False,
+        )
+        embed.set_footer(text="La watch sera creee seulement apres confirmation.")
+        return embed
+
+    async def _edit(self, interaction: discord.Interaction, status: str | None = None) -> None:
+        if interaction.guild is None or not _is_admin(interaction):
+            await _deny(interaction)
+            return
+        await interaction.response.edit_message(embed=self.build_embed(interaction.guild, status), view=self)
+
+    async def set_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.GuildChannel | discord.Thread,
+    ) -> None:
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await interaction.response.send_message("Choisis un salon texte.", ephemeral=True)
+            return
+        self.channel_id = channel.id
+        await self._edit(interaction)
+
+    async def set_role(self, interaction: discord.Interaction, role: discord.Role | None) -> None:
+        self.role_id = role.id if role else None
+        await self._edit(interaction)
+
+    async def _set_interval(self, interaction: discord.Interaction, seconds: int) -> None:
+        self.interval_seconds = max(seconds, MIN_INTERVAL_SECONDS)
+        self._sync_interval_buttons()
+        await self._edit(interaction)
+
+    def _sync_interval_buttons(self) -> None:
+        for item in self.children:
+            if not isinstance(item, discord.ui.Button) or item.label not in {"10s", "15s", "30s"}:
+                continue
+            item.style = (
+                discord.ButtonStyle.primary
+                if item.label == f"{self.interval_seconds}s"
+                else discord.ButtonStyle.secondary
+            )
+
+    def _disable_items(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="10s", style=discord.ButtonStyle.secondary, row=2)
+    async def interval_10(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._set_interval(interaction, 10)
+
+    @discord.ui.button(label="15s", style=discord.ButtonStyle.primary, row=2)
+    async def interval_15(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._set_interval(interaction, 15)
+
+    @discord.ui.button(label="30s", style=discord.ButtonStyle.secondary, row=2)
+    async def interval_30(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._set_interval(interaction, 30)
+
+    @discord.ui.button(label="Confirmer", emoji="\u2705", style=discord.ButtonStyle.success, row=3)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not _is_admin(interaction):
+            await _deny(interaction)
+            return
+        if self.channel_id is None:
+            await interaction.response.send_message("Choisis d'abord le salon des alertes.", ephemeral=True)
+            return
+
+        channel = self._selected_channel(interaction.guild)
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            await interaction.response.send_message("Le salon choisi est introuvable.", ephemeral=True)
+            return
+        if self.db.get_watch_by_url(interaction.guild.id, self.url) is not None:
+            self._disable_items()
+            await interaction.response.edit_message(
+                embed=self.build_embed(interaction.guild, "Cette URL est deja surveillee."),
+                view=self,
+            )
+            return
+
+        max_watches = int(getattr(self.bot, "max_watches_per_guild", 20))
+        if self.db.count_watches(interaction.guild.id) >= max_watches:
+            self._disable_items()
+            await interaction.response.edit_message(
+                embed=self.build_embed(interaction.guild, f"Limite atteinte: maximum {max_watches} watches."),
+                view=self,
+            )
+            return
+
+        self._disable_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(interaction.guild, "Premier scan en cours..."),
+            view=self,
+        )
 
         try:
-            interval = max(int(str(self.interval.value).strip()), MIN_INTERVAL_SECONDS)
-        except ValueError:
-            await interaction.followup.send("Intervalle invalide.", ephemeral=True)
-            return
-
-        role = _resolve_role(interaction.guild, str(self.role_ping.value))
-
-        try:
-            scrape_result = await self.monitor.fetch_products_once(normalized_url)
+            scrape_result = await self.monitor.fetch_products_once(self.url)
         except Exception as exc:
-            await interaction.followup.send(f"Premier scan impossible: `{exc}`", ephemeral=True)
+            await interaction.edit_original_response(
+                embed=self.build_embed(interaction.guild, f"Premier scan impossible: `{exc}`"),
+                view=None,
+            )
             return
         if not scrape_result.products:
-            await interaction.followup.send("Aucun produit detecte, watch non ajoutee.", ephemeral=True)
+            await interaction.edit_original_response(
+                embed=self.build_embed(interaction.guild, "Aucun produit detecte, watch non ajoutee."),
+                view=None,
+            )
             return
 
         watch = self.db.add_watch(
             interaction.guild.id,
-            normalized_url,
-            alert_channel.id,
-            interval,
-            role.id if role else None,
+            self.url,
+            channel.id,
+            self.interval_seconds,
+            self.role_id,
         )
         self.db.upsert_products(watch.id, scrape_result.products)
         self.monitor.restart_watch(watch.id)
         await refresh_dashboard_message(self.bot, self.db, self.monitor, interaction.guild)
-        await interaction.followup.send(f"Watch ajoutee: `{normalized_url}`", ephemeral=True)
+
+        status = (
+            f"Watch activee. Produits sauvegardes: {len(scrape_result.products)}. "
+            f"Source: {scrape_result.stats.source}."
+        )
+        await interaction.edit_original_response(embed=self.build_embed(interaction.guild, status), view=None)
         await send_log(
             self.bot,
-            f"Watch ajoutee depuis le dashboard avec {len(scrape_result.products)} produit(s).",
+            f"Watch ajoutee depuis le flow interactif avec {len(scrape_result.products)} produit(s).",
             "info",
             interaction.guild,
             db=self.db,
             action="Watch ajoutee",
-            url=normalized_url,
+            url=self.url,
             user=interaction.user,
+        )
+
+    @discord.ui.button(label="Annuler", emoji="\u274c", style=discord.ButtonStyle.danger, row=3)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if interaction.guild is None or not _is_admin(interaction):
+            await _deny(interaction)
+            return
+        self._disable_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(interaction.guild, "Ajout annule. Aucune watch n'a ete creee."),
+            view=None,
         )
 
 
