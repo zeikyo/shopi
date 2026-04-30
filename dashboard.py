@@ -197,6 +197,7 @@ class AddUrlModal(discord.ui.Modal, title="Ajouter une URL"):
 class AlertChannelSelect(discord.ui.ChannelSelect):
     def __init__(self) -> None:
         super().__init__(
+            custom_id="shopmon:add_url:channel",
             placeholder="Choisir le salon des alertes",
             channel_types=[discord.ChannelType.text, discord.ChannelType.news],
             min_values=1,
@@ -208,12 +209,14 @@ class AlertChannelSelect(discord.ui.ChannelSelect):
         view = self.view
         if not isinstance(view, AddUrlConfigView):
             return
-        await view.set_channel(interaction, self.values[0])
+        values = (interaction.data or {}).get("values", [])
+        await view.set_channel(interaction, int(values[0]) if values else None)
 
 
 class PingRoleSelect(discord.ui.RoleSelect):
     def __init__(self) -> None:
         super().__init__(
+            custom_id="shopmon:add_url:role",
             placeholder="Choisir un role a ping (optionnel)",
             min_values=0,
             max_values=1,
@@ -224,32 +227,32 @@ class PingRoleSelect(discord.ui.RoleSelect):
         view = self.view
         if not isinstance(view, AddUrlConfigView):
             return
-        role = self.values[0] if self.values else None
-        await view.set_role(interaction, role)
+        values = (interaction.data or {}).get("values", [])
+        await view.set_role(interaction, int(values[0]) if values else None)
 
 
 class AddUrlConfigView(discord.ui.View):
     def __init__(self, bot: discord.Client, db: Database, monitor: Any, url: str) -> None:
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.bot = bot
         self.db = db
         self.monitor = monitor
         self.url = url
-        self.channel_id: int | None = None
-        self.role_id: int | None = None
-        self.interval_seconds = 15
+        self.selected_channel: int | None = None
+        self.selected_role: int | None = None
+        self.selected_interval = 15
         self.add_item(AlertChannelSelect())
         self.add_item(PingRoleSelect())
         self._sync_interval_buttons()
 
     def _selected_channel(self, guild: discord.Guild) -> discord.TextChannel | discord.Thread | None:
-        if self.channel_id is None:
+        if self.selected_channel is None:
             return None
-        channel = guild.get_channel(self.channel_id)
+        channel = guild.get_channel(self.selected_channel)
         return channel if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
 
     def _selected_role(self, guild: discord.Guild) -> discord.Role | None:
-        return guild.get_role(self.role_id) if self.role_id is not None else None
+        return guild.get_role(self.selected_role) if self.selected_role is not None else None
 
     def _config_lines(self, guild: discord.Guild) -> str:
         channel = self._selected_channel(guild)
@@ -257,7 +260,7 @@ class AddUrlConfigView(discord.ui.View):
         return (
             f"URL: <{self.url}>\n"
             f"Salon: {channel.mention if channel else 'a choisir'}\n"
-            f"Intervalle: {self.interval_seconds}s\n"
+            f"Intervalle: {self.selected_interval}s\n"
             f"Role ping: {role.mention if role else 'aucun'}"
         )
 
@@ -284,20 +287,30 @@ class AddUrlConfigView(discord.ui.View):
     async def set_channel(
         self,
         interaction: discord.Interaction,
-        channel: discord.abc.GuildChannel | discord.Thread,
+        channel_id: int | None,
     ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Serveur introuvable.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(channel_id) if channel_id is not None else None
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await interaction.response.send_message("Choisis un salon texte.", ephemeral=True)
             return
-        self.channel_id = channel.id
+        self.selected_channel = channel.id
         await self._edit(interaction)
 
-    async def set_role(self, interaction: discord.Interaction, role: discord.Role | None) -> None:
-        self.role_id = role.id if role else None
+    async def set_role(self, interaction: discord.Interaction, role_id: int | None) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Serveur introuvable.", ephemeral=True)
+            return
+        if role_id is not None and interaction.guild.get_role(role_id) is None:
+            await interaction.response.send_message("Role introuvable.", ephemeral=True)
+            return
+        self.selected_role = role_id
         await self._edit(interaction)
 
     async def _set_interval(self, interaction: discord.Interaction, seconds: int) -> None:
-        self.interval_seconds = max(seconds, MIN_INTERVAL_SECONDS)
+        self.selected_interval = max(seconds, MIN_INTERVAL_SECONDS)
         self._sync_interval_buttons()
         await self._edit(interaction)
 
@@ -307,7 +320,7 @@ class AddUrlConfigView(discord.ui.View):
                 continue
             item.style = (
                 discord.ButtonStyle.primary
-                if item.label == f"{self.interval_seconds}s"
+                if item.label == f"{self.selected_interval}s"
                 else discord.ButtonStyle.secondary
             )
 
@@ -315,24 +328,24 @@ class AddUrlConfigView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-    @discord.ui.button(label="10s", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="10s", style=discord.ButtonStyle.secondary, custom_id="shopmon:add_url:interval:10", row=2)
     async def interval_10(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._set_interval(interaction, 10)
 
-    @discord.ui.button(label="15s", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="15s", style=discord.ButtonStyle.primary, custom_id="shopmon:add_url:interval:15", row=2)
     async def interval_15(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._set_interval(interaction, 15)
 
-    @discord.ui.button(label="30s", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="30s", style=discord.ButtonStyle.secondary, custom_id="shopmon:add_url:interval:30", row=2)
     async def interval_30(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self._set_interval(interaction, 30)
 
-    @discord.ui.button(label="Confirmer", emoji="\u2705", style=discord.ButtonStyle.success, row=3)
+    @discord.ui.button(label="Confirmer", emoji="\u2705", style=discord.ButtonStyle.success, custom_id="shopmon:add_url:confirm", row=3)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None or not _is_admin(interaction):
             await _deny(interaction)
             return
-        if self.channel_id is None:
+        if not self.selected_channel:
             await interaction.response.send_message("Choisis d'abord le salon des alertes.", ephemeral=True)
             return
 
@@ -382,8 +395,8 @@ class AddUrlConfigView(discord.ui.View):
             interaction.guild.id,
             self.url,
             channel.id,
-            self.interval_seconds,
-            self.role_id,
+            self.selected_interval,
+            self.selected_role,
         )
         self.db.upsert_products(watch.id, scrape_result.products)
         self.monitor.restart_watch(watch.id)
@@ -405,7 +418,7 @@ class AddUrlConfigView(discord.ui.View):
             user=interaction.user,
         )
 
-    @discord.ui.button(label="Annuler", emoji="\u274c", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Annuler", emoji="\u274c", style=discord.ButtonStyle.danger, custom_id="shopmon:add_url:cancel", row=3)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if interaction.guild is None or not _is_admin(interaction):
             await _deny(interaction)
