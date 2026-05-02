@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import discord
@@ -254,6 +257,66 @@ def setup_commands(
             f"Pong: Discord {latency_ms:.0f}ms | scan moyen {avg_scan:.2f}s",
             ephemeral=True,
         )
+
+    @tree.command(name="analyse_carte", description="Analyse le centrage d'une carte Pokemon depuis une photo.")
+    @app_commands.describe(image="Photo de la carte Pokemon a analyser")
+    async def analyse_carte(
+        interaction: discord.Interaction,
+        image: Optional[discord.Attachment] = None,
+    ) -> None:
+        if image is None:
+            await interaction.response.send_message("Aucune image envoyee.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        with tempfile.TemporaryDirectory(prefix="pokemon_card_") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            analysis_error_type: type[Exception] = Exception
+            try:
+                import cv2
+                from pokemon_card_analysis import (
+                    CardAnalysisError,
+                    analyze_card_image,
+                    download_attachment,
+                )
+
+                analysis_error_type = CardAnalysisError
+                image_path = await download_attachment(image, tmp_path)
+                analysis = await asyncio.to_thread(analyze_card_image, image_path)
+                output_path = tmp_path / "analyse_carte.png"
+                if not cv2.imwrite(str(output_path), analysis.annotated_image):
+                    raise CardAnalysisError("Impossible de generer l'image annotee.")
+            except ImportError:
+                LOGGER.exception("Dependances OpenCV manquantes")
+                await interaction.followup.send(
+                    "Analyse impossible: dependances manquantes. Installez `opencv-python-headless` et `numpy`.",
+                    ephemeral=True,
+                )
+                return
+            except analysis_error_type as exc:
+                await interaction.followup.send(f"Analyse impossible: {exc}", ephemeral=True)
+                return
+            except Exception:
+                LOGGER.exception("Erreur inattendue pendant l'analyse de carte")
+                await interaction.followup.send(
+                    "Erreur inattendue pendant l'analyse de la carte.",
+                    ephemeral=True,
+                )
+                return
+
+            centering = analysis.centering
+            message = (
+                "**Analyse du centrage**\n"
+                f"Gauche/Droite : {centering.left_percent:.1f}% / {centering.right_percent:.1f}%\n"
+                f"Haut/Bas : {centering.top_percent:.1f}% / {centering.bottom_percent:.1f}%\n"
+                f"Estimation : {analysis.grade_estimate}\n"
+                "Estimation uniquement, non garantie."
+            )
+            await interaction.followup.send(
+                content=message,
+                file=discord.File(str(output_path), filename="analyse_carte.png"),
+            )
 
     @tree.command(name="test_alert", description="Envoie une fausse alerte de test dans le salon configure.")
     async def test_alert(interaction: discord.Interaction, url: str) -> None:
